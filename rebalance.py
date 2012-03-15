@@ -4,6 +4,7 @@ import sys
 import subprocess
 import json
 import ConfigParser
+import getopt
 
 #[global]
 #port:8091
@@ -28,8 +29,13 @@ cli = "/opt/couchbase/lib/python/couchbase-cli"
 bucket = "default"
 verbose = False
 
-def usage():
-    print "./rebalance.py <inifile> <master:port> <num_in> <num_out> [phase_hint]"
+def usage(err=None):
+    err_code = 0
+    if err:
+        err_code = 1
+        print "Error:",err
+        print
+    print "./rebalance.py -i <inifile> -m <master:port> +<num_in> -<num_out> --phase-hint=[phase_hint]"
     print ""
     print " inifile            the standard testrunner ini with all nodes listed (base nodes + number rebalance in + number rebalance out"
     print " num_in             number of nodes to rebalance in (chooses from the end of the server list)"
@@ -37,13 +43,13 @@ def usage():
     print " phase_hint         1: remove nodes from the end of the list, 2: remove nodes from the start of the list"
     print ""
     print " assuming we start with 24 nodes:"
-    print "./rebalance.py nodes.ini master:port 24 12 1"
-    print "./rebalance.py nodes.ini master:port 12 12 2"
-    print "./rebalance.py nodes.ini master:port 12 0"
+    print "./rebalance.py -i nodes.ini -m master:port +24 -12 --phase-hint=1"
+    print "./rebalance.py -i nodes.ini -m master:port +12 -12 --phase-hint=2"
+    print "./rebalance.py -i nodes.ini -m master:port +12"
     print """24 nodes -> (add 24 new nodes and remove 12 existing nodes) -> 36 nodes
 36 nodes -> (add 12 nodes with upgraded RAM that were removed  and remove 12 existing nodes with lower RAM size) -> 36 nodes
 36 nodes -> (add 12 nodes with upgraded RAM that were removed in previous rebalance)  -> 48 nodes"""
-    sys.exit()
+    sys.exit(err_code)
 
 
 def run_cmd(cmd):
@@ -87,7 +93,6 @@ def _vbucket_diff(original_vbuckets, new_vbuckets, index):
         rtn += "created " + `created_vbuckets` + " replica vbuckets" + "\n"
         rtn += "deleted " + `deleted_vbuckets` + " replica vbuckets"
     
-
     return rtn
 
 def vbucket_active_diff(original_vbuckets, new_vbuckets):
@@ -180,7 +185,49 @@ class Server(object):
 
 
 class Config(object):
-    def __init__(self, inifile, master, num_in, num_out, phase_hint=0):
+    def __init__(self, argv):
+        # defaults
+        phase_hint = 0
+        num_in = 0
+        num_out = 0
+        master = None
+        inifile = None
+
+        # first parse out the num_in and num_out
+        argv_stripped = []
+        for arg in argv[1:]:
+            if arg[0] == "+":
+                num_in = int(arg[1:])
+            elif arg[0] == "-" and arg[1:].isdigit():
+                num_out = int(arg[1:])
+            else:
+                argv_stripped.append(arg)
+
+        try:
+            (opts, args) = getopt.getopt(argv_stripped, 'hi:m:p:', ['help', 'ini=', 'master=', 'phase-hint='])
+        except IndexError:
+            usage()
+        except getopt.GetoptError, err:
+            usage(err)
+
+        for o, a in opts:
+            if o == "-h" or o == "--help":
+                usage()
+            if o == "-i" or o == "--ini":
+                inifile = a
+            if o == "-m" or o == "--master":
+                master = a
+            if o == "-p" or o == "--phase-hint":
+                phase_hint = int(a)
+
+        if not inifile:
+            usage("missing ini file")
+        if not master:
+            usage("missing master")
+        if not num_in and not num_out:
+            usage("missing num_in or num_out")
+
+
         self.servers = []
         self.master = None
         self.num_in = int(num_in)
@@ -225,17 +272,25 @@ class Config(object):
         for index,server in servers_map.iteritems():
             self.servers.append(server)
 
+    def __str__(self):
+        rtn = ""
+        rtn += "servers:\n"
+        for s in self.servers:
+            if s == self.master:
+                rtn += "*" + `s` + "\n"
+            else:
+                rtn += " " + `s` + "\n"
+
+        rtn += "num_in: " + `self.num_in` + "\n"
+        rtn += "num_out: " + `self.num_out` + "\n"
+        rtn += "phase_hint: " + `self.phase_hint` + "\n"
+
+        return rtn
+
 
 if __name__ == "__main__":
-    if len(sys.argv) < 5:
-        usage()
-
-    if len(sys.argv) == 6:
-        phase_hint = sys.argv[5]
-    else:
-        phase_hint = 0
-
-    config = Config(sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], phase_hint)
+    
+    config = Config(sys.argv)
 
     # get current vbucket state
     original_vbuckets = config.master.vbucket_map()
@@ -255,10 +310,10 @@ if __name__ == "__main__":
     else:
         servers_remove = current_servers[:config.num_out]
 
-    print "adding {0} nodes".format(sys.argv[3])
+    print "adding {0} nodes".format(config.num_in)
     for server in servers_add:
         print " " + `server`
-    print "removing {0} nodes".format(sys.argv[4])
+    print "removing {0} nodes".format(config.num_out)
     for server in servers_remove:
         print " " + `server`
 
